@@ -6,6 +6,12 @@ import pjson from "../package.json";
 import { bind_template, hasTemplate } from "./helpers/templates";
 import { hass } from "./helpers/hass";
 
+declare global {
+  interface Window {
+    loadCardHelpers?: { () };
+  }
+}
+
 const OPTIONS = [
   "icon",
   "active",
@@ -20,7 +26,7 @@ const OPTIONS = [
   // with hue in the range 0-360 and saturation 0-100.
   // Works only if entity is unset and active is set.
   "color",
-  "toggle",
+  "rowtype",
   "tap_action",
   "hold_action",
   "double_tap_action",
@@ -37,6 +43,8 @@ const translate = (hass, text: String) => {
   });
 };
 
+const stopPropagation = (ev) => ev.stopPropagation();
+
 class TemplateEntityRow extends LitElement {
   @property() _config;
   @property() hass;
@@ -48,6 +56,14 @@ class TemplateEntityRow extends LitElement {
     this.config = { ...this._config };
 
     this.bind_templates();
+
+    (async () => {
+      const cardHelpers = await window.loadCardHelpers();
+      if (!customElements.get("ha-select"))
+        cardHelpers.createRowElement({type: "select-entity"});
+      if (!customElements.get("ha-date-input") || !customElements.get("ha-time-input"))
+        cardHelpers.createRowElement({type: "input-datetime-entity"});
+    })();
   }
 
   async bind_templates() {
@@ -136,7 +152,8 @@ class TemplateEntityRow extends LitElement {
     const hidden =
       this.config.condition !== undefined &&
       String(this.config.condition).toLowerCase() !== "true";
-    const show_toggle = this.config.toggle && this.config.entity;
+
+    const rowtype = this.config.rowtype;
     const has_action =
       this.config.entity ||
       this.config.tap_action ||
@@ -163,15 +180,36 @@ class TemplateEntityRow extends LitElement {
           <div class="secondary">${secondary}</div>
         </div>
         <div class="state">
-          ${show_toggle
-            ? html`<ha-entity-toggle .hass=${this.hass} .stateObj=${entity}>
-              </ha-entity-toggle>`
-            : state}
+          ${rowtype === "toggle"
+          ? html`<ha-entity-toggle .hass=${this.hass} .stateObj=${entity}>
+            </ha-entity-toggle>`
+          : (rowtype === "select"
+          ? html`<ha-select .value=${state} .options=${entity.attributes.options} .disabled=${state === "unavailable"} naturalMenuWidth @action=${this._handleSelectAction} @click=${stopPropagation} @closed=${stopPropagation}>
+            ${entity.attributes.options
+            ? entity.attributes.options.map((option) =>
+              html`<ha-list-item .value=${option}>
+                ${this.hass!.formatEntityState(entity, option)}
+              </ha-list-item>`)
+            : ""}
+            </ha-select>`
+          : (rowtype === "input-datetime"
+            ? html`<div class=${entity.attributes.has_date && entity.attributes.has_time ? "both" : ""} style="display:inline-flex;">
+            ${entity.attributes.has_date
+            ? html`<ha-date-input .locale=${this.hass.locale} .disabled=${state === "unavailable" || state === "unknown"} .value=${entity.attributes.year || "1970"}-${String(entity.attributes.month || "01").padStart(2, "0")}-${String(entity.attributes.day || "01").padStart(2, "0")}T${String(entity.attributes.hour || "00").padStart(2, "0")}:${String(entity.attributes.minute || "00").padStart(2, "0")}:${String(entity.attributes.second || "00").padStart(2, "0")} @value-changed=${this._dateChanged}>
+              </ha-date-input>`
+            : ``}
+            ${entity.attributes.has_date && entity.attributes.has_time ? html`&nbsp;` : ""}
+            ${entity.attributes.has_time
+            ? html`<ha-time-input .value=${state === "unknown" ? "" : entity.attributes.has_date ? state.split(" ")[1] : state} .locale=${this.hass.locale} .disabled=${state === "unavailable" || state === "unknown"} .enableSecond=${true} @value-changed=${this._timeChanged} @click=${stopPropagation}>
+              </ha-time-input>`
+            : ``}
+            </div>`
+          : state))}
         </div>
       </div>
       <div id="staging">
-        <hui-generic-entity-row .hass=${this.hass} .config=${this.config}>
-        </hui-generic-entity-row>
+        <hui-generic-entity-row .hass=${this.hass} .config=${this.config}></hui-generic-entity-row>
+        <input-datetime-entity></input-datetime-entity>
       </div>
     `;
   }
@@ -202,6 +240,38 @@ class TemplateEntityRow extends LitElement {
         }
       `,
     ];
+  }
+
+  private _handleSelectAction(ev): void {
+    const stateObj = this.hass!.states[this._config!.entity];
+
+    const option = ev.target.value;
+
+    if (
+      option === stateObj.state ||
+      !stateObj.attributes.options.includes(option)
+    ) {
+      return;
+    }
+
+    if (stateObj.entity_id.startsWith("select."))
+        this.hass!.callService("select", "select_option", { option }, { entity_id: stateObj.entity_id });
+    else if (stateObj.entity_id.startsWith("input_select."))
+        this.hass!.callService("input_select", "select_option", { option, entity_id: stateObj.entity_id });
+  }
+
+  private _timeChanged(ev): void {
+    const stateObj = this.hass!.states[this._config!.entity];
+
+    const param = { entity_id: stateObj.entity_id, time: ev.detail.value, date: stateObj.attributes.has_date ? stateObj.state.split(" ")[0] : undefined };
+    this.hass!.callService("input_datetime", "set_datetime", param);
+  }
+
+  private _dateChanged(ev): void {
+    const stateObj = this.hass!.states[this._config!.entity];
+
+    const param = { entity_id: stateObj.entity_id, time: stateObj.attributes.has_time ? stateObj.state.split(" ")[1] : undefined, date: ev.detail.value };
+    this.hass!.callService("input_datetime", "set_datetime", param);
   }
 }
 
